@@ -100,6 +100,9 @@ name = "Notion Test Site"
 # of the generated site, and loconotion will parse all sub-pages present on the page
 page = "https://www.notion.so/Loconotion-Example-Page-03c403f4fdc94cc1b315b9469a8950ef"
 
+# optionally apply notion's dark mode, remove the line below to use the default light mode
+theme = "dark"
+
 ## Global Site Settings ##
 # this [site] table defines override settings for the whole site
 # later on we will see how to define settings for a single page
@@ -181,13 +184,20 @@ page = "https://www.notion.so/Loconotion-Example-Page-03c403f4fdc94cc1b315b9469a
     [pages.d2fa06f244e64f66880bb0491f58223d.fonts]
     title = 'DM Mono' 
 
-  # set up pretty slugs for the other database pages
+  # set up pretty slugs and options for the other database pages
   [pages.54dab6011e604430a21dc477cb8e4e3a]
     slug = "film-gallery"
+
   [pages.2604ce45890645c79f67d92833083fee]
     slug = "books-table"
-  [pages.ae0a85c527824a3a855b7f4d31f4e0fc]
+
+    # don't follow any link on the page, skipping parsing sub-pages linked from this one
+    # useful for large tables where we don't want individual pages for each item
+    no-links = true
+
+  [pages.a28dba2e7a67448da52f2cd2c641407b]
     slug = "random-board"
+    no-links = true
 ```
 
 On top of this, the script can take these optional arguments:
@@ -198,6 +208,7 @@ On top of this, the script can take these optional arguments:
                         Use a specific chromedriver executable instead of the
                         auto-installing one
   --single-page         Only parse the first page, then stop
+  --dark-theme          Use dark themed version of the target Notion.so page
   --timeout TIMEOUT     Time in seconds to wait for the loading of lazy-loaded
                         dynamic elements (default 5). If content from the page
                         seems to be missing, try increasing this value
@@ -223,6 +234,7 @@ On top of this, the script can take these optional arguments:
 ## Sites built with Loconotion
 
 - [leonclvt.com](https://leoncvlt.com)
+- [aahnik.dev](https://aahnik.dev)
 
 If you used Loconotion to build a cool site and want it added to the list above, shoot me a mail or submit a pull request!
 

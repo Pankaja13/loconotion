@@ -116,7 +116,7 @@ class Parser:
                     return {**site_config, **matching_page_config}
                 else:
                     log.error(
-                        f"Matching page configuration for {url} was not a dict:"
+                        f"Matching page configuration for {token} was not a dict:"
                         f" {matching_page_config} - something went wrong"
                     )
                     return site_config
@@ -223,7 +223,7 @@ class Parser:
                 sys.exit()
 
         log.info(f"Initialising chromedriver at {chromedriver_path}")
-        logs_path = Path.cwd() / "logs" / "webdrive.log"
+        logs_path = Path.cwd() / ".logs" / "webdrive.log"
         logs_path.parent.mkdir(parents=True, exist_ok=True)
 
         chrome_options = Options()
@@ -244,22 +244,30 @@ class Parser:
         )
 
     def parse_page(self, url, processed_pages={}, index=None):
-        # if this is the first page being parse, set it as the index.html
-        if not index:
-            index = url
-
         log.info(f"Parsing page '{url}'")
         log.debug(f"Using page config: {self.get_page_config(url)}")
-        self.driver.get(url)
 
         try:
-            WebDriverWait(self.driver, 60).until(notion_page_loaded())
+            self.load(url)
+            if not index:
+                # if this is the first page being parse, set it as the index.html
+                index = url
+                # if dark theme is enabled, set local storage item and re-load the page
+                if self.args.get("dark_theme", True):
+                    log.debug(f"Dark theme is enabled")
+                    self.driver.execute_script("window.localStorage.setItem('theme','{\"mode\":\"dark\"}');")
+                    self.load(url)
         except TimeoutException as ex:
             log.critical(
                 "Timeout waiting for page content to load, or no content found."
                 " Are you sure the page is set to public?"
             )
             return
+
+        # light theme is on by default
+        # enable dark mode based on https://fruitionsite.com/ dark mode hack
+        if self.config.get('theme') == 'dark':
+            self.driver.execute_script("__console.environment.ThemeStore.setState({ mode: 'dark' });")
 
         # scroll at the bottom of the notion-scroller element to load all elements
         # continue once there are no changes in height after a timeout
@@ -342,6 +350,10 @@ class Parser:
         for vendors_css in soup.find_all("link", href=lambda x: x and "vendors~" in x):
             vendors_css.decompose()
 
+        # collection selectors (List, Gallery, etc.) don't work, so remove them
+        for collection_selector in soup.findAll("div", {"class": "notion-collection-view-select"}):
+            collection_selector.decompose()
+
         # clean up the default notion meta tags
         for tag in [
             "description",
@@ -402,8 +414,8 @@ class Parser:
                 style = cssutils.parseStyle(img["style"])
                 spritesheet = style["background"]
                 spritesheet_url = spritesheet[
-                    spritesheet.find("(") + 1 : spritesheet.find(")")
-                ]
+                                  spritesheet.find("(") + 1: spritesheet.find(")")
+                                  ]
                 cached_spritesheet_url = self.cache_file(
                     "https://www.notion.so" + spritesheet_url
                 )
@@ -418,21 +430,31 @@ class Parser:
                 # we don't need the vendors stylesheet
                 if "vendors~" in link["href"]:
                     continue
-                # css_file = link['href'].strip("/")
                 cached_css_file = self.cache_file("https://www.notion.so" + link["href"])
-                with open(self.dist_folder / cached_css_file, "rb") as f:
+                # files in the css file might be reference with a relative path,
+                # so store the path of the current css file
+                parent_css_path = os.path.split(urllib.parse.urlparse(link["href"]).path)[0]
+                # open the locally saved file
+                with open(self.dist_folder / cached_css_file, "rb+") as f:
                     stylesheet = cssutils.parseString(f.read())
                     # open the stylesheet and check for any font-face rule,
                     for rule in stylesheet.cssRules:
                         if rule.type == cssutils.css.CSSRule.FONT_FACE_RULE:
                             # if any are found, download the font file
+                            # TODO: maths fonts have fallback font sources
                             font_file = (
-                                rule.style["src"].split("url(/")[-1].split(") format")[0]
+                                rule.style["src"].split("url(")[-1].split(")")[0]
                             )
-                            cached_font_file = self.cache_file(
-                                f"https://www.notion.so/{font_file}"
-                            )
-                            rule.style["src"] = f"url({str(cached_font_file)})"
+                            # assemble the url given the current css path
+                            font_url = "/".join(p.strip("/") for p in ["https://www.notion.so", parent_css_path, font_file] if p.strip("/"))
+                            # don't hash the font files filenames, rather get filename only
+                            cached_font_file = self.cache_file(font_url, Path(font_file).name)
+                            rule.style["src"] = f"url({cached_font_file})"
+                    # commit stylesheet edits to file
+                    f.seek(0)
+                    f.truncate()
+                    f.write(stylesheet.cssText)
+                        
                 link["href"] = str(cached_css_file)
 
         # add our custom logic to all toggle blocks
@@ -458,7 +480,7 @@ class Parser:
         # the link to the row item is equal to its data-block-id without dashes
         for table_view in soup.findAll("div", {"class": "notion-table-view"}):
             for table_row in table_view.findAll(
-                "div", {"class": "notion-collection-item"}
+                    "div", {"class": "notion-collection-item"}
             ):
                 table_row_block_id = table_row["data-block-id"]
                 table_row_href = "/" + table_row_block_id.replace("-", "")
@@ -554,34 +576,52 @@ class Parser:
 
         # find sub-pages and clean slugs / links
         sub_pages = []
-        for a in soup.findAll("a"):
-            if a["href"].startswith("/"):
+        parse_links = not self.get_page_config(url).get("no-links", False)
+        for a in soup.find_all('a', href=True):
+            sub_page_href = a["href"]
+            if sub_page_href.startswith("/"):
                 sub_page_href = "https://www.notion.so" + a["href"]
-                # if the link is an anchor link,
-                # check if the page hasn't already been parsed
-                if "#" in sub_page_href:
-                    sub_page_href_tokens = sub_page_href.split("#")
-                    sub_page_href = sub_page_href_tokens[0]
-                    a["href"] = "#" + sub_page_href_tokens[-1]
-                    a["class"] = a.get("class", []) + ["loconotion-anchor-link"]
-                    if (
-                        sub_page_href in processed_pages.keys()
-                        or sub_page_href in sub_pages
-                    ):
-                        log.debug(
-                            f"Original page for anchor link {sub_page_href}"
-                            " already parsed / pending parsing, skipping"
+            if sub_page_href.startswith("https://www.notion.so/"):
+                if parse_links or not len(a.find_parents("div", class_="notion-scroller")):
+                    # if the link is an anchor link,
+                    # check if the page hasn't already been parsed
+                    if "#" in sub_page_href:
+                        sub_page_href_tokens = sub_page_href.split("#")
+                        sub_page_href = sub_page_href_tokens[0]
+                        a["href"] = "#" + sub_page_href_tokens[-1]
+                        a["class"] = a.get("class", []) + ["loconotion-anchor-link"]
+                        if (
+                                sub_page_href in processed_pages.keys()
+                                or sub_page_href in sub_pages
+                        ):
+                            log.debug(
+                                f"Original page for anchor link {sub_page_href}"
+                                " already parsed / pending parsing, skipping"
+                            )
+                            continue
+                    else:
+                        a["href"] = (
+                            self.get_page_slug(sub_page_href)
+                            if sub_page_href != index
+                            else "index.html"
                         )
-                        continue
+                    sub_pages.append(sub_page_href)
+                    log.debug(f"Found link to page {a['href']}")
                 else:
-                    a["href"] = (
-                        self.get_page_slug(sub_page_href)
-                        if sub_page_href != index
-                        else "index.html"
-                    )
-                sub_pages.append(sub_page_href)
-                log.debug(f"Found link to page {a['href']}")
+                    # if the page is set not to follow any links, strip the href
+                    # do this only on children of .notion-scroller, we don't want
+                    # to strip the links from the top nav bar
+                    log.debug(f"Stripping link for {a['href']}")
+                    del a["href"]
+                    a.name = "span"
+                    # remove pointer cursor styling on the link and all children
+                    for child in ([a] + a.find_all()):
+                        if (child.has_attr("style")):
+                            style = cssutils.parseStyle(child['style'])
+                            style['cursor'] = "default"
+                            child['style'] = style.cssText
 
+            
         # exports the parsed page
         html_str = str(soup)
         html_file = self.get_page_slug(url) if url != index else "index.html"
@@ -608,6 +648,10 @@ class Parser:
 
         # we're all done!
         return processed_pages
+
+    def load(self, url):
+        self.driver.get(url)
+        WebDriverWait(self.driver, 60).until(notion_page_loaded())
 
     def run(self, url):
         start_time = time.time()
